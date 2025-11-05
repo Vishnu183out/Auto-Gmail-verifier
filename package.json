@@ -1,0 +1,21 @@
+{
+  "name": "auto-gmail",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@google-cloud/pubsub": "^5.2.0",
+    "axios": "^1.13.2",
+    "body-parser": "^2.2.0",
+    "cheerio": "^1.1.2",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "googleapis": "^164.1.0"
+  }
+}
