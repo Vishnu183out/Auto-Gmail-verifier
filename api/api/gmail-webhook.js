@@ -1,22 +1,15 @@
-import express from "express";
-import bodyParser from "body-parser";
+// api/gmail-webhook.js
 import { google } from "googleapis";
 import dotenv from "dotenv";
-import fs from "fs";
-import { processEmailMessage } from "./mailProcessor.js";
-
+import { processEmailMessage } from "../mailProcessor.js";
 
 dotenv.config();
-
-const app = express();
-app.use(bodyParser.json({ type: "application/json" }));
 
 const {
   CLIENT_ID,
   CLIENT_SECRET,
   REDIRECT_URI,
   REFRESH_TOKEN,
-  PORT = 3000,
 } = process.env;
 
 const oauth2Client = new google.auth.OAuth2(
@@ -27,28 +20,16 @@ const oauth2Client = new google.auth.OAuth2(
 oauth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
 const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
-const HISTORY_FILE = "lastHistory.json";
+// In-memory lastHistoryId (serverless functions are stateless)
 let lastHistoryId = null;
 
-// --- Load saved history ID (if any) ---
-if (fs.existsSync(HISTORY_FILE)) {
-  try {
-    const saved = JSON.parse(fs.readFileSync(HISTORY_FILE, "utf-8"));
-    if (saved.historyId) {
-      lastHistoryId = saved.historyId;
-      console.log("🧠 Loaded lastHistoryId from file:", lastHistoryId);
-    }
-  } catch (e) {
-    console.warn("⚠️ Failed to read saved history:", e);
+export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(405).send("Method Not Allowed");
   }
-}
-
-// --- Gmail Webhook Endpoint ---
-app.post("/gmail-webhook", async (req, res) => {
-  console.log("✅ Incoming webhook hit!");
-  console.log("🪵 Raw body:", JSON.stringify(req.body, null, 2));
 
   try {
+    console.log("✅ Gmail webhook hit!");
     const pubsubMessage = req.body.message;
     if (!pubsubMessage || !pubsubMessage.data) {
       console.error("❌ Invalid Pub/Sub message format");
@@ -65,9 +46,9 @@ app.post("/gmail-webhook", async (req, res) => {
       return res.status(200).send("No historyId");
     }
 
-    // First webhook (no history saved yet)
+    // First webhook: fetch latest email if no lastHistoryId
     if (!lastHistoryId) {
-      console.log("🧭 No previous history found — fetching latest email directly...");
+      console.log("🧭 Fetching latest email since no previous historyId...");
       const messagesList = await gmail.users.messages.list({
         userId: "me",
         labelIds: ["INBOX"],
@@ -80,28 +61,28 @@ app.post("/gmail-webhook", async (req, res) => {
         const headers = msg.data.payload.headers;
 
         const from = headers.find((h) => h.name === "From")?.value || "(Unknown)";
-        const subject =
-          headers.find((h) => h.name === "Subject")?.value || "(No Subject)";
-        const date = headers.find((h) => h.name === "Date")?.value || "Unknown";
+        const subject = headers.find((h) => h.name === "Subject")?.value || "(No Subject)";
+        const date = headers.find((h) => h.name === "Date")?.value || "(Unknown)";
 
         console.log("📧 First Email Captured:");
         console.log("   🧑 From:", from);
         console.log("   📝 Subject:", subject);
         console.log("   📅 Date:", date);
         console.log("--------------------------------------");
+
+        // Call Netflix processor
+        await processEmailMessage(msg.data, from, subject);
       } else {
         console.log("⚠️ No messages found in inbox yet.");
       }
 
       lastHistoryId = currentHistoryId;
-      fs.writeFileSync(HISTORY_FILE, JSON.stringify({ historyId: currentHistoryId }));
       console.log("💾 Initialized lastHistoryId →", currentHistoryId);
       return res.status(200).send("Initialized with first mail");
     }
 
-    // --- For subsequent notifications ---
+    // --- Process Gmail history
     console.log(`📜 Fetching Gmail history from ${lastHistoryId} → ${currentHistoryId}`);
-
     const historyResponse = await gmail.users.history.list({
       userId: "me",
       startHistoryId: lastHistoryId,
@@ -120,61 +101,25 @@ app.post("/gmail-webhook", async (req, res) => {
           });
 
           const headers = msg.data.payload.headers;
-          const from =
-            headers.find((h) => h.name === "From")?.value || "(Unknown Sender)";
-          const subject =
-            headers.find((h) => h.name === "Subject")?.value || "(No Subject)";
-          const date =
-            headers.find((h) => h.name === "Date")?.value || "(No Date)";
-          const snippet = msg.data.snippet || "";
+          const from = headers.find((h) => h.name === "From")?.value || "(Unknown Sender)";
+          const subject = headers.find((h) => h.name === "Subject")?.value || "(No Subject)";
 
           console.log("📧 New Email Received:");
           console.log("   🧑 From:", from);
           console.log("   📝 Subject:", subject);
-          console.log("   📅 Date:", date);
-console.log("--------------------------------------");
+          console.log("--------------------------------------");
 
-// Call Netflix processor
-await processEmailMessage(msg.data, from, subject);
-
+          // Call Netflix processor
+          await processEmailMessage(msg.data, from, subject);
         }
       }
     }
 
-    // --- Update stored history ID ---
     lastHistoryId = currentHistoryId;
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify({ historyId: currentHistoryId }));
     console.log("🔁 Updated lastHistoryId →", currentHistoryId);
-
     res.status(200).send("OK");
   } catch (err) {
     console.error("❌ Error processing Gmail webhook:", err);
     res.status(500).send("Error: " + err.message);
   }
-});
-
-// --- Gmail Watch Starter ---
-app.get("/start-watch", async (req, res) => {
-  try {
-    const watchResponse = await gmail.users.watch({
-      userId: "me",
-      requestBody: {
-        topicName: "projects/sixth-decoder-476816-s9/topics/gmail-notifications",
-        labelIds: ["INBOX"],
-      },
-    });
-
-    console.log("✅ Gmail Watch started:", watchResponse.data);
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify({ historyId: watchResponse.data.historyId }));
-    lastHistoryId = watchResponse.data.historyId;
-    res.json(watchResponse.data);
-  } catch (error) {
-    console.error("❌ Error starting watch:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`🚀 Gmail Webhook Server running on port ${PORT}`);
-  console.log(`📡 Listening for Gmail Pub/Sub notifications at /gmail-webhook`);
-});
+}
