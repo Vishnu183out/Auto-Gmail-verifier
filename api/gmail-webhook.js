@@ -5,12 +5,7 @@ import { processEmailMessage } from "../mailProcessor.js";
 
 dotenv.config();
 
-const {
-  CLIENT_ID,
-  CLIENT_SECRET,
-  REDIRECT_URI,
-  REFRESH_TOKEN,
-} = process.env;
+const { CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, REFRESH_TOKEN } = process.env;
 
 const oauth2Client = new google.auth.OAuth2(
   CLIENT_ID,
@@ -24,9 +19,7 @@ const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 let lastHistoryId = null;
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).send("Method Not Allowed");
-  }
+  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
   try {
     console.log("✅ Gmail webhook hit!");
@@ -70,7 +63,6 @@ export default async function handler(req, res) {
         console.log("   📅 Date:", date);
         console.log("--------------------------------------");
 
-        // Call Netflix processor
         await processEmailMessage(msg.data, from, subject);
       } else {
         console.log("⚠️ No messages found in inbox yet.");
@@ -81,16 +73,31 @@ export default async function handler(req, res) {
       return res.status(200).send("Initialized with first mail");
     }
 
-    // --- Process Gmail history
+    // --- Process Gmail history safely ---
     console.log(`📜 Fetching Gmail history from ${lastHistoryId} → ${currentHistoryId}`);
-    const historyResponse = await gmail.users.history.list({
-      userId: "me",
-      startHistoryId: lastHistoryId,
-      historyTypes: ["messageAdded"],
-    });
+    let histories = [];
 
-    const histories = historyResponse.data.history || [];
-    console.log(`📬 Found ${histories.length} new history records.`);
+    try {
+      const historyResponse = await gmail.users.history.list({
+        userId: "me",
+        startHistoryId: lastHistoryId,
+        historyTypes: ["messageAdded"],
+      });
+
+      histories = historyResponse.data.history || [];
+      console.log(`📬 Found ${histories.length} new history records.`);
+    } catch (err) {
+      // If historyId is invalid (too old), reset it to currentHistoryId
+      if (err.response?.status === 404) {
+        console.warn(
+          "⚠️ Last historyId not found. Resetting lastHistoryId to current notification."
+        );
+        lastHistoryId = currentHistoryId;
+        return res.status(200).send("Reset lastHistoryId due to history gap");
+      } else {
+        throw err; // rethrow other errors
+      }
+    }
 
     for (const event of histories) {
       if (event.messagesAdded) {
@@ -109,7 +116,6 @@ export default async function handler(req, res) {
           console.log("   📝 Subject:", subject);
           console.log("--------------------------------------");
 
-          // Call Netflix processor
           await processEmailMessage(msg.data, from, subject);
         }
       }
