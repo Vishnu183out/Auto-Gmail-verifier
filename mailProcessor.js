@@ -72,7 +72,7 @@ async function clickNetflixLinksRecursively(html, depth = 0) {
  * - Auto-clicks any Netflix verification links recursively
  */
 export async function processEmailMessage(msg, from, subject) {
-  if (!from.includes("vishnureddy3121siva@gmail.com")) {
+  if (!from.includes("info@account.netflix.com")) {
     console.log("📭 Ignoring non-Netflix mail from:", from);
     return;
   }
