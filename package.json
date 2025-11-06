@@ -13,6 +13,7 @@
   "dependencies": {
     "@google-cloud/pubsub": "^5.2.0",
     "@sparticuz/chromium": "^141.0.0",
+    "@sparticuz/chromium-min": "^141.0.0",
     "axios": "^1.13.2",
     "body-parser": "^2.2.0",
     "cheerio": "^1.1.2",

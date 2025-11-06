@@ -1,7 +1,6 @@
 // api/gmail-webhook.js
 import { google } from "googleapis";
 import dotenv from "dotenv";
-import { processEmailMessage } from "../mailProcessor.js";
 
 dotenv.config();
 
@@ -16,138 +15,155 @@ oauth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
 
 const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
-// In-memory lastHistoryId (serverless functions are stateless)
+// store lastHistoryId in memory
 let lastHistoryId = null;
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).send("Method Not Allowed");
+// ✉️ define your recipients
+const RECIPIENTS = [
+  "vishnu183out@gmail.com",
+  "hrushikeshpenubarthi@gmail.com",
+  "amirudhshanmukha2399@gmail.com",
+];
+
+/**
+ * Helper: decode Base64 URL-safe strings
+ */
+function decodeBase64(encoded) {
+  const buff = Buffer.from(encoded.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+  return buff.toString("utf-8");
+}
+
+/**
+ * Helper: forward message to specific recipients
+ */
+async function forwardEmail(msg, from, subject) {
+  console.log(`📤 Forwarding email from Netflix → ${RECIPIENTS.join(", ")}`);
+
+  let bodyHtml = "";
+  const parts = msg.payload.parts || [msg.payload];
+
+  for (const part of parts) {
+    if (part.mimeType === "text/html" && part.body?.data) {
+      bodyHtml = decodeBase64(part.body.data);
+      break;
+    } else if (part.mimeType === "multipart/alternative" && part.parts) {
+      for (const sub of part.parts) {
+        if (sub.mimeType === "text/html" && sub.body?.data) {
+          bodyHtml = decodeBase64(sub.body.data);
+          break;
+        }
+      }
+    }
   }
 
+  const rawMessage = [
+    `From: me`,
+    `To: ${RECIPIENTS.join(", ")}`,
+    `Subject: Fwd: ${subject}`,
+    `Content-Type: text/html; charset="UTF-8"`,
+    ``,
+    `<p><b>Forwarded message from:</b> ${from}</p><hr/>${bodyHtml}`,
+  ].join("\n");
+
+  const encodedMessage = Buffer.from(rawMessage)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+  await gmail.users.messages.send({
+    userId: "me",
+    requestBody: { raw: encodedMessage },
+  });
+
+  console.log("✅ Email successfully forwarded.");
+}
+
+/**
+ * Webhook Handler
+ */
+export default async function handler(req, res) {
+  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+
   try {
-    console.log("✅ Gmail webhook hit!");
+    console.log("✅ Gmail webhook triggered!");
 
     const pubsubMessage = req.body.message;
-    if (!pubsubMessage || !pubsubMessage.data) {
-      console.error("❌ Invalid Pub/Sub message format");
-      return res.status(400).send("Invalid message");
-    }
+    if (!pubsubMessage?.data) return res.status(400).send("Invalid Pub/Sub data");
 
     const decoded = Buffer.from(pubsubMessage.data, "base64").toString("utf-8");
     const notification = JSON.parse(decoded);
     console.log("🔍 Decoded Data:", notification);
 
     const currentHistoryId = Number(notification.historyId);
-    if (!currentHistoryId) {
-      console.warn("⚠️ No historyId found in notification");
-      return res.status(200).send("No historyId");
-    }
+    if (!currentHistoryId) return res.status(200).send("No historyId");
 
-    // --- First webhook: fetch latest email if no lastHistoryId
+    // first-time setup
     if (!lastHistoryId) {
-      console.log("🧭 Fetching latest email since no previous historyId...");
-      const messagesList = await gmail.users.messages.list({
+      console.log("🧭 Fetching latest email (first webhook init)...");
+      const list = await gmail.users.messages.list({
         userId: "me",
         labelIds: ["INBOX"],
         maxResults: 1,
       });
 
-      if (messagesList.data.messages?.length) {
-        const msgId = messagesList.data.messages[0].id;
+      if (list.data.messages?.length) {
+        const msgId = list.data.messages[0].id;
         const msg = await gmail.users.messages.get({ userId: "me", id: msgId });
         const headers = msg.data.payload.headers;
-
         const from = headers.find((h) => h.name === "From")?.value || "(Unknown)";
         const subject = headers.find((h) => h.name === "Subject")?.value || "(No Subject)";
-        const date = headers.find((h) => h.name === "Date")?.value || "(Unknown)";
 
-        console.log("📧 First Email Captured:");
-        console.log("   🧑 From:", from);
-        console.log("   📝 Subject:", subject);
-        console.log("   📅 Date:", date);
-        console.log("--------------------------------------");
-
-        // Call Netflix processor
-        await processEmailMessage(msg.data, from, subject);
-      } else {
-        console.log("⚠️ No messages found in inbox yet.");
+        if (from.toLowerCase().includes("info@account.netflix.com")) {
+          await forwardEmail(msg.data, from, subject);
+        } else {
+          console.log("📭 Not a Netflix mail, skipping forward.");
+        }
       }
 
       lastHistoryId = currentHistoryId;
-      console.log("💾 Initialized lastHistoryId →", lastHistoryId);
+      console.log("💾 Initialized history tracking:", lastHistoryId);
       return res.status(200).send("Initialized with first mail");
     }
 
-    // --- Process Gmail history with error handling for history gap ---
-    try {
-      console.log(`📜 Fetching Gmail history from ${lastHistoryId} → ${currentHistoryId}`);
-      const historyResponse = await gmail.users.history.list({
-        userId: "me",
-        startHistoryId: lastHistoryId,
-        historyTypes: ["messageAdded"],
-      });
+    // process subsequent history events
+    const historyResponse = await gmail.users.history.list({
+      userId: "me",
+      startHistoryId: lastHistoryId,
+      historyTypes: ["messageAdded"],
+    });
 
-      const histories = historyResponse.data.history || [];
-      console.log(`📬 Found ${histories.length} new history records.`);
+    const histories = historyResponse.data.history || [];
+    console.log(`📬 Found ${histories.length} new messages.`);
 
-      for (const event of histories) {
-        if (event.messagesAdded) {
-          for (const added of event.messagesAdded) {
-            const msg = await gmail.users.messages.get({
-              userId: "me",
-              id: added.message.id,
-            });
-
-            const headers = msg.data.payload.headers;
-            const from = headers.find((h) => h.name === "From")?.value || "(Unknown Sender)";
-            const subject = headers.find((h) => h.name === "Subject")?.value || "(No Subject)";
-
-            console.log("📧 New Email Received:");
-            console.log("   🧑 From:", from);
-            console.log("   📝 Subject:", subject);
-            console.log("--------------------------------------");
-
-            // Call Netflix processor
-            await processEmailMessage(msg.data, from, subject);
-          }
-        }
-      }
-    } catch (err) {
-      if (err.code === 404) {
-        console.warn(
-          "⚠️ Last historyId not found. Gmail history gap detected. Fetching latest emails instead..."
-        );
-
-        const messagesList = await gmail.users.messages.list({
-          userId: "me",
-          labelIds: ["INBOX"],
-          maxResults: 10, // fetch last 10 messages
-        });
-
-        for (const message of messagesList.data.messages || []) {
+    for (const event of histories) {
+      if (event.messagesAdded) {
+        for (const added of event.messagesAdded) {
           const msg = await gmail.users.messages.get({
             userId: "me",
-            id: message.id,
+            id: added.message.id,
           });
 
           const headers = msg.data.payload.headers;
-          const from = headers.find((h) => h.name === "From")?.value || "(Unknown Sender)";
+          const from = headers.find((h) => h.name === "From")?.value || "(Unknown)";
           const subject = headers.find((h) => h.name === "Subject")?.value || "(No Subject)";
 
-          console.log("📧 New Email (from gap):", from, "-", subject);
-          await processEmailMessage(msg.data, from, subject);
+          console.log("📧 Received:", from, "-", subject);
+
+          if (from.toLowerCase().includes("info@account.netflix.com")) {
+            await forwardEmail(msg.data, from, subject);
+          } else {
+            console.log("📭 Ignored non-Netflix mail.");
+          }
         }
-      } else {
-        throw err; // rethrow other errors
       }
     }
 
-    // --- Update lastHistoryId ---
     lastHistoryId = currentHistoryId;
     console.log("🔁 Updated lastHistoryId →", lastHistoryId);
     res.status(200).send("OK");
   } catch (err) {
-    console.error("❌ Error processing Gmail webhook:", err);
+    console.error("❌ Error in Gmail webhook:", err);
     res.status(500).send("Error: " + err.message);
   }
 }
