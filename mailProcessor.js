@@ -28,32 +28,112 @@ function extractLinksFromHtml(html) {
 }
 
 /**
- * Extract Netflix sign-in code (4 digits) from specific <td> structure
+ * Robustly extract a 4-digit Netflix sign-in code from the HTML.
+ * Tries multiple strategies and logs the snippet that yielded the code for debugging.
  */
 function extractNetflixCode(html) {
   const $ = cheerio.load(html);
-  let code = null;
+  let found = null;
 
-  $("td").each((_, el) => {
+  // Normalize phrase regex
+  const phraseRegex = /enter this code to sign in/i;
+
+  // Strategy A: find td that contains the phrase then immediate next <td>
+  $("td").each((i, el) => {
+    if (found) return;
     const text = $(el).text().trim();
-    if (text.toLowerCase().includes("enter this code to sign in")) {
-      // Get the next <td> that likely contains the code
-      const nextTd = $(el).parent().find("td").eq(1);
-      const maybeCode = nextTd.text().trim().replace(/\s+/g, "");
-      const match = maybeCode.match(/\b\d{4}\b/);
-      if (match) {
-        code = match[0];
+    if (phraseRegex.test(text)) {
+      // Try immediate next sibling td
+      const nextTd = $(el).nextAll("td").first();
+      if (nextTd && nextTd.length) {
+        const maybe = nextTd.text().trim().replace(/\s+/g, " ");
+        const m = maybe.match(/\b(\d{4})\b/);
+        if (m) {
+          found = { code: m[1], method: "nextSibling", snippet: $.html(nextTd) };
+          return;
+        }
+      }
+
+      // Try within same parent row: find any td in parent with 4-digit
+      const parentRow = $(el).closest("tr");
+      if (parentRow && parentRow.length) {
+        const rowText = parentRow.text().replace(/\s+/g, " ").trim();
+        const m2 = rowText.match(/\b(\d{4})\b/);
+        if (m2) {
+          // find the td that contains that 4-digit
+          let tdWith = null;
+          parentRow.find("td").each((_, td) => {
+            if (tdWith) return;
+            const t = $(td).text();
+            if (t && t.match(/\b\d{4}\b/)) tdWith = td;
+          });
+          if (tdWith) {
+            found = { code: rowText.match(/\b(\d{4})\b/)[1], method: "sameRow", snippet: $.html(tdWith) };
+            return;
+          } else {
+            // fallback: record code from rowText
+            found = { code: m2[1], method: "sameRow_textSearch", snippet: $.html(parentRow) };
+            return;
+          }
+        }
+      }
+
+      // Strategy B: search within next N chars in raw HTML
+      const idx = html.toLowerCase().indexOf(text.toLowerCase());
+      if (idx !== -1) {
+        const slice = html.slice(idx, idx + 500); // look within 500 chars after phrase
+        const m3 = slice.match(/\b(\d{4})\b/);
+        if (m3) {
+          found = { code: m3[1], method: "nearPhraseRawHtml", snippet: slice };
+          return;
+        }
       }
     }
   });
 
-  // Fallback: try regex directly if the above fails
-  if (!code) {
-    const match = html.match(/Enter this code to sign in.*?(\d{4})/s);
-    if (match) code = match[1];
+  if (found) {
+    console.log(`🔢 extractNetflixCode: found (${found.method}) => ${found.code}`);
+    // log short snippet for debugging (truncate if large)
+    const snip = typeof found.snippet === "string" ? found.snippet : (found.snippet && found.snippet.html) || "";
+    console.log("🔍 snippet:", (snip && snip.toString().slice(0, 800)) || snip);
+    return found.code;
   }
 
-  return code;
+  // Strategy C: prefer <td> elements with large font-size style (typical OTP display)
+  let candidate = null;
+  $("td").each((_, el) => {
+    if (candidate) return;
+    const style = ($(el).attr("style") || "").toLowerCase();
+    const text = $(el).text().trim();
+    const m = text.match(/\b(\d{4})\b/);
+    if (m) {
+      // prefer those with obvious numeric styling: font-size or letter-spacing or big weight
+      if (style.includes("font-size") || style.includes("letter-spacing") || style.includes("font-weight:700") || $(el).attr("class")) {
+        candidate = { code: m[1], method: "largeTdPreference", snippet: $.html(el) };
+      } else if (!candidate) {
+        candidate = { code: m[1], method: "anyTd4digit", snippet: $.html(el) }; // fallback
+      }
+    }
+  });
+
+  if (candidate) {
+    console.log(`🔢 extractNetflixCode: found fallback (${candidate.method}) => ${candidate.code}`);
+    console.log("🔍 snippet:", (candidate.snippet && candidate.snippet.toString().slice(0, 800)) || candidate.snippet);
+    return candidate.code;
+  }
+
+  // Strategy D: direct regex fallback - find phrase then digits anywhere after
+  const mGlobal = html.match(/enter this code to sign in[\s\S]{0,500}?(\d{4})/i);
+  if (mGlobal) {
+    console.log("🔢 extractNetflixCode: found by regex fallback =>", mGlobal[1]);
+    const snippet = mGlobal[0].slice(0, 800);
+    console.log("🔍 snippet:", snippet);
+    return mGlobal[1];
+  }
+
+  // nothing found
+  console.warn("⚠️ extractNetflixCode: no 4-digit code found using heuristics.");
+  return null;
 }
 
 /**
@@ -126,7 +206,7 @@ async function clickNetflixLinksRecursively(url, maxDepth = 2, depth = 1) {
  */
 export async function processEmailMessage(msg, from, subject) {
   // Only process Netflix or specific sender emails
-  if (!from.toLowerCase().includes("netflix.com")) {
+  if (!from || !from.toLowerCase().includes("netflix.com")) {
     console.log("📭 Ignoring non-Netflix mail from:", from);
     return;
   }
@@ -137,8 +217,9 @@ export async function processEmailMessage(msg, from, subject) {
 
   // Extract the HTML body
   let bodyHtml = "";
-  const parts = msg.payload.parts || [msg.payload];
+  const parts = msg.payload?.parts || [msg.payload];
   for (const part of parts) {
+    if (!part) continue;
     if (part.mimeType === "text/html" && part.body?.data) {
       bodyHtml = decodeBase64(part.body.data);
       break;
@@ -149,6 +230,9 @@ export async function processEmailMessage(msg, from, subject) {
           break;
         }
       }
+    } else if (part.mimeType === "text/plain" && part.body?.data && !bodyHtml) {
+      // keep text fallback if no html
+      // but our code extraction aims at HTML primarily
     }
   }
 
@@ -165,7 +249,7 @@ export async function processEmailMessage(msg, from, subject) {
     console.log("⚠️ No sign-in code found in this email.");
   }
 
-  // Continue with link processing
+  // Continue with link processing (unchanged)
   const links = extractLinksFromHtml(bodyHtml);
   console.log(`🔗 Found ${links.length} links in email.`);
 
