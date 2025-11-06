@@ -1,10 +1,25 @@
 {
   "version": 2,
-  "builds": [{ "src": "api/gmail-webhook.js", "use": "@vercel/node" }],
+  "builds": [
+    {
+      "src": "api/gmail-webhook.js",
+      "use": "@vercel/node",
+      "config": {
+        "maxLambdaSize": "50mb"
+      }
+    }
+  ],
   "routes": [
     {
       "src": "/(.*)",
       "dest": "api/gmail-webhook.js"
     }
-  ]
+  ],
+  "functions": {
+    "api/gmail-webhook.js": {
+      "runtime": "nodejs20.x",
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  }
 }

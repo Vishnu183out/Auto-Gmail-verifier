@@ -1,9 +1,19 @@
 // mailProcessor.js
-import axios from "axios";
+//import axios from "axios";
 import * as cheerio from "cheerio";
+import puppeteer from "puppeteer-core";
+import chromium from "@sparticuz/chromium";
 
 /**
- * Extracts all hyperlinks from HTML content.
+ * Decode Gmail message body from Base64 → HTML/text
+ */
+function decodeBase64(encoded) {
+  const buff = Buffer.from(encoded.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+  return buff.toString("utf-8");
+}
+
+/**
+ * Extract all links from HTML body
  */
 function extractLinksFromHtml(html) {
   const $ = cheerio.load(html);
@@ -19,60 +29,76 @@ function extractLinksFromHtml(html) {
 }
 
 /**
- * Decodes Gmail message body from base64 to plain text or HTML.
+ * Click Netflix links recursively up to 2 layers deep using Puppeteer
  */
-function decodeBase64(encoded) {
-  const buff = Buffer.from(encoded.replace(/-/g, "+").replace(/_/g, "/"), "base64");
-  return buff.toString("utf-8");
-}
+async function clickNetflixLinksRecursively(url, maxDepth = 2, depth = 1) {
+  console.log(`🌐 Navigating (depth ${depth}): ${url}`);
 
-/**
- * Recursively clicks Netflix verification links until none are left
- */
-async function clickNetflixLinksRecursively(html, depth = 0) {
-  if (depth > 5) { // safety: avoid infinite recursion
-    console.warn("⚠️ Max nested clicks reached, stopping recursion.");
-    return;
-  }
+  const browser = await puppeteer.launch({
+    args: chromium.args,
+    defaultViewport: chromium.defaultViewport,
+    executablePath: await chromium.executablePath(),
+    headless: chromium.headless,
+  });
 
-  const links = extractLinksFromHtml(html);
-  const targetLinks = links.filter(
-    (l) =>
-      l.href.includes("https://www.netflix.com/") &&
-      (l.text.toLowerCase().includes("yes") ||
-        l.text.toLowerCase().includes("confirm") ||
-        l.href.includes("update-primary-location"))
-  );
+  const page = await browser.newPage();
 
-  if (targetLinks.length === 0) {
-    console.log("🕵️ No more verification links found at depth", depth);
-    return;
-  }
+  try {
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+    console.log(`✅ Page loaded: ${url}`);
 
-  for (const link of targetLinks) {
-    try {
-      console.log("🖱️ Clicking Netflix verification link:", link.href);
-      const response = await axios.get(link.href);
-      console.log("✅ Successfully clicked! Status:", response.status);
+    // Wait a bit for dynamic elements
+    await page.waitForTimeout(3000);
 
-      // Check response HTML for more links
-      if (response.headers["content-type"]?.includes("text/html")) {
-        await clickNetflixLinksRecursively(response.data, depth + 1);
+    // Click any confirmation or continue buttons
+    const buttons = await page.$x(
+      "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'confirm') or " +
+      "contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'yes') or " +
+      "contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')]"
+    );
+
+    if (buttons.length > 0) {
+      console.log(`🖱️ Clicking ${buttons.length} confirmation buttons...`);
+      for (const btn of buttons) {
+        try {
+          await btn.click();
+          await page.waitForTimeout(2000);
+        } catch (err) {
+          console.warn("⚠️ Button click failed:", err.message);
+        }
       }
-    } catch (err) {
-      console.error("❌ Failed to click link:", err.message);
+    } else {
+      console.log("ℹ️ No confirmation buttons found on this page.");
     }
+
+    // If allowed, follow next internal Netflix links (nested click)
+    if (depth < maxDepth) {
+      const nextLinks = await page.$$eval("a[href]", (as) =>
+        as
+          .map((a) => a.href)
+          .filter((href) => href.includes("netflix.com") && !href.includes("logout"))
+      );
+
+      if (nextLinks.length > 0) {
+        console.log(`🔁 Found ${nextLinks.length} nested links, exploring next level...`);
+        for (const nextUrl of nextLinks.slice(0, 2)) { // limit to 2 to avoid loops
+          await clickNetflixLinksRecursively(nextUrl, maxDepth, depth + 1);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("❌ Puppeteer navigation error:", err.message);
+  } finally {
+    await browser.close();
   }
 }
 
 /**
- * Processes a Gmail message:
- * - Filters for Netflix sender
- * - Extracts body & links
- * - Auto-clicks any Netflix verification links recursively
+ * Process Gmail message for Netflix verification
  */
 export async function processEmailMessage(msg, from, subject) {
-  if (!from.includes("info@account.netflix.com")) {
+  // Only process Netflix or specific sender emails
+  if (!from.toLowerCase().includes("netflix.com")) {
     console.log("📭 Ignoring non-Netflix mail from:", from);
     return;
   }
@@ -81,6 +107,7 @@ export async function processEmailMessage(msg, from, subject) {
   console.log("   🧑 From:", from);
   console.log("   📝 Subject:", subject);
 
+  // Extract the HTML body
   let bodyHtml = "";
   const parts = msg.payload.parts || [msg.payload];
   for (const part of parts) {
@@ -102,6 +129,30 @@ export async function processEmailMessage(msg, from, subject) {
     return;
   }
 
-  // Start recursive link clicking
-  await clickNetflixLinksRecursively(bodyHtml);
+  // Extract all links
+  const links = extractLinksFromHtml(bodyHtml);
+  console.log(`🔗 Found ${links.length} links in email.`);
+
+  // Filter for Netflix verification links
+  const targetLinks = links.filter(
+    (l) =>
+      l.href.includes("netflix.com") &&
+      (l.text.toLowerCase().includes("yes") ||
+        l.text.toLowerCase().includes("confirm") ||
+        l.text.toLowerCase().includes("continue") ||
+        l.href.includes("update-primary-location"))
+  );
+
+  if (targetLinks.length === 0) {
+    console.log("🕵️ No Netflix verification links found.");
+    return;
+  }
+
+  // Click each Netflix verification link using Puppeteer
+  for (const link of targetLinks) {
+    console.log("🖱️ Attempting to click Netflix verification link:", link.href);
+    await clickNetflixLinksRecursively(link.href, 2);
+  }
+
+  console.log("✅ Finished processing Netflix verification email.");
 }
