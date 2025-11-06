@@ -13,16 +13,20 @@ const oauth2Client = new google.auth.OAuth2(
   REDIRECT_URI
 );
 oauth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
+
 const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
 // In-memory lastHistoryId (serverless functions are stateless)
 let lastHistoryId = null;
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
+  if (req.method !== "POST") {
+    return res.status(405).send("Method Not Allowed");
+  }
 
   try {
     console.log("✅ Gmail webhook hit!");
+
     const pubsubMessage = req.body.message;
     if (!pubsubMessage || !pubsubMessage.data) {
       console.error("❌ Invalid Pub/Sub message format");
@@ -39,7 +43,7 @@ export default async function handler(req, res) {
       return res.status(200).send("No historyId");
     }
 
-    // First webhook: fetch latest email if no lastHistoryId
+    // --- First webhook: fetch latest email if no lastHistoryId
     if (!lastHistoryId) {
       console.log("🧭 Fetching latest email since no previous historyId...");
       const messagesList = await gmail.users.messages.list({
@@ -63,66 +67,84 @@ export default async function handler(req, res) {
         console.log("   📅 Date:", date);
         console.log("--------------------------------------");
 
+        // Call Netflix processor
         await processEmailMessage(msg.data, from, subject);
       } else {
         console.log("⚠️ No messages found in inbox yet.");
       }
 
       lastHistoryId = currentHistoryId;
-      console.log("💾 Initialized lastHistoryId →", currentHistoryId);
+      console.log("💾 Initialized lastHistoryId →", lastHistoryId);
       return res.status(200).send("Initialized with first mail");
     }
 
-    // --- Process Gmail history safely ---
-    console.log(`📜 Fetching Gmail history from ${lastHistoryId} → ${currentHistoryId}`);
-    let histories = [];
-
+    // --- Process Gmail history with error handling for history gap ---
     try {
+      console.log(`📜 Fetching Gmail history from ${lastHistoryId} → ${currentHistoryId}`);
       const historyResponse = await gmail.users.history.list({
         userId: "me",
         startHistoryId: lastHistoryId,
         historyTypes: ["messageAdded"],
       });
 
-      histories = historyResponse.data.history || [];
+      const histories = historyResponse.data.history || [];
       console.log(`📬 Found ${histories.length} new history records.`);
-    } catch (err) {
-      // If historyId is invalid (too old), reset it to currentHistoryId
-      if (err.response?.status === 404) {
-        console.warn(
-          "⚠️ Last historyId not found. Resetting lastHistoryId to current notification."
-        );
-        lastHistoryId = currentHistoryId;
-        return res.status(200).send("Reset lastHistoryId due to history gap");
-      } else {
-        throw err; // rethrow other errors
-      }
-    }
 
-    for (const event of histories) {
-      if (event.messagesAdded) {
-        for (const added of event.messagesAdded) {
+      for (const event of histories) {
+        if (event.messagesAdded) {
+          for (const added of event.messagesAdded) {
+            const msg = await gmail.users.messages.get({
+              userId: "me",
+              id: added.message.id,
+            });
+
+            const headers = msg.data.payload.headers;
+            const from = headers.find((h) => h.name === "From")?.value || "(Unknown Sender)";
+            const subject = headers.find((h) => h.name === "Subject")?.value || "(No Subject)";
+
+            console.log("📧 New Email Received:");
+            console.log("   🧑 From:", from);
+            console.log("   📝 Subject:", subject);
+            console.log("--------------------------------------");
+
+            // Call Netflix processor
+            await processEmailMessage(msg.data, from, subject);
+          }
+        }
+      }
+    } catch (err) {
+      if (err.code === 404) {
+        console.warn(
+          "⚠️ Last historyId not found. Gmail history gap detected. Fetching latest emails instead..."
+        );
+
+        const messagesList = await gmail.users.messages.list({
+          userId: "me",
+          labelIds: ["INBOX"],
+          maxResults: 10, // fetch last 10 messages
+        });
+
+        for (const message of messagesList.data.messages || []) {
           const msg = await gmail.users.messages.get({
             userId: "me",
-            id: added.message.id,
+            id: message.id,
           });
 
           const headers = msg.data.payload.headers;
           const from = headers.find((h) => h.name === "From")?.value || "(Unknown Sender)";
           const subject = headers.find((h) => h.name === "Subject")?.value || "(No Subject)";
 
-          console.log("📧 New Email Received:");
-          console.log("   🧑 From:", from);
-          console.log("   📝 Subject:", subject);
-          console.log("--------------------------------------");
-
+          console.log("📧 New Email (from gap):", from, "-", subject);
           await processEmailMessage(msg.data, from, subject);
         }
+      } else {
+        throw err; // rethrow other errors
       }
     }
 
+    // --- Update lastHistoryId ---
     lastHistoryId = currentHistoryId;
-    console.log("🔁 Updated lastHistoryId →", currentHistoryId);
+    console.log("🔁 Updated lastHistoryId →", lastHistoryId);
     res.status(200).send("OK");
   } catch (err) {
     console.error("❌ Error processing Gmail webhook:", err);
