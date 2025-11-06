@@ -17,25 +17,21 @@ function decodeBase64(encoded) {
 function extractLinksFromHtml(html) {
   const $ = cheerio.load(html);
   const links = [];
-
   $("a[href]").each((_, el) => {
     const href = $(el).attr("href");
     const text = $(el).text().trim();
     if (href) links.push({ href, text });
   });
-
   return links;
 }
 
 /**
- * Wait helper
+ * Delay helper
  */
-function delay(ms) {
-  return new Promise((res) => setTimeout(res, ms));
-}
+const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
 /**
- * Click Netflix links recursively up to 2 levels deep using Puppeteer
+ * Recursive Netflix link clicker (up to depth 2)
  */
 async function clickNetflixLinksRecursively(url, maxDepth = 2, depth = 1) {
   console.log(`🌐 Navigating (depth ${depth}): ${url}`);
@@ -52,39 +48,41 @@ async function clickNetflixLinksRecursively(url, maxDepth = 2, depth = 1) {
   try {
     await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
     console.log(`✅ Page loaded: ${url}`);
+    await delay(4000); // allow dynamic content to load
 
-    // Wait for dynamic buttons to render
-    await delay(4000);
-
-    // Step 1: Look for primary "Yes, this was me" button
-    const yesButton = await findButton(page, ["yes", "this was me", "continue"]);
+    // Step 1️⃣ Look for primary "Yes, this was me" button
+    const yesButton = await findButton(page, ["yes this was me", "yes", "continue"]);
     if (yesButton) {
       console.log("🖱️ Clicking 'Yes, this was me'...");
       await yesButton.click();
-      await delay(5000);
+      await delay(6000); // give time for redirect
     } else {
       console.log("ℹ️ No 'Yes, this was me' button found.");
     }
 
-    // Step 2: Look for secondary confirmation button ("Confirm update")
-    const confirmButton = await findButton(page, ["confirm update", "confirm", "continue"]);
-    if (confirmButton) {
-      console.log("🖱️ Clicking 'Confirm update'...");
-      await confirmButton.click();
-      await delay(5000);
-      console.log("✅ Successfully confirmed Netflix update.");
-    } else {
-      console.log("ℹ️ No secondary confirmation button found.");
+    // Step 2️⃣ Wait for the "Confirm Update" button (depth 2)
+    try {
+      console.log("🕐 Waiting for 'Confirm Update' button...");
+      await page.waitForSelector('button[data-uia="set-primary-location-action"]', { timeout: 10000 });
+
+      const confirmButton = await page.$('button[data-uia="set-primary-location-action"]');
+      if (confirmButton) {
+        await page.evaluate((el) => el.scrollIntoView(), confirmButton);
+        await delay(1000);
+        await confirmButton.click();
+        console.log("✅ 'Confirm Update' button clicked successfully!");
+      } else {
+        console.log("⚠️ Could not find 'Confirm Update' button after navigation.");
+      }
+    } catch {
+      console.log("ℹ️ 'Confirm Update' button not found or page did not render it.");
     }
 
-    // Step 3: Explore deeper Netflix links (optional recursive step)
+    // Step 3️⃣ Optional recursive follow-up
     if (depth < maxDepth) {
       const nextLinks = await page.$$eval("a[href]", (as) =>
-        as
-          .map((a) => a.href)
-          .filter((href) => href.includes("netflix.com") && !href.includes("logout"))
+        as.map((a) => a.href).filter((href) => href.includes("netflix.com") && !href.includes("logout"))
       );
-
       if (nextLinks.length > 0) {
         console.log(`🔁 Found ${nextLinks.length} nested Netflix links. Exploring...`);
         for (const nextUrl of nextLinks.slice(0, 2)) {
@@ -115,10 +113,9 @@ async function findButton(page, keywords) {
 }
 
 /**
- * Main exported function — used by gmail-webhook.js
+ * Main exported function — called by gmail-webhook.js
  */
 export async function processEmailMessage(msg, from, subject) {
-  // Process only Netflix mails
   if (!from.toLowerCase().includes("netflix.com")) {
     console.log("📭 Ignoring non-Netflix mail from:", from);
     return;
@@ -154,7 +151,7 @@ export async function processEmailMessage(msg, from, subject) {
   const links = extractLinksFromHtml(bodyHtml);
   console.log(`🔗 Found ${links.length} links in email.`);
 
-  // Filter for Netflix links (Yes/Confirm/Continue/Household)
+  // Filter Netflix links (Yes / Confirm / Continue / update-primary-location)
   const targetLinks = links.filter(
     (l) =>
       l.href.includes("netflix.com") &&
@@ -169,7 +166,7 @@ export async function processEmailMessage(msg, from, subject) {
     return;
   }
 
-  // Click the main Netflix verification links recursively
+  // Visit and click verification links
   for (const link of targetLinks) {
     console.log("🖱️ Attempting to click Netflix verification link:", link.href);
     await clickNetflixLinksRecursively(link.href, 2);
