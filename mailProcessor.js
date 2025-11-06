@@ -34,7 +34,7 @@ function decodeBase64(encoded) {
  */
 export async function processEmailMessage(msg, from, subject) {
   // 1️⃣ Only process Netflix verification mails
-  if (!from.includes("vishnureddy3121siva@gmail.com")) {
+  if (!from.includes("info@account.netflix.com")) {
     console.log("📭 Ignoring non-Netflix mail from:", from);
     return;
   }
