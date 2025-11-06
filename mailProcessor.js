@@ -27,14 +27,52 @@ function decodeBase64(encoded) {
 }
 
 /**
+ * Recursively clicks Netflix verification links until none are left
+ */
+async function clickNetflixLinksRecursively(html, depth = 0) {
+  if (depth > 5) { // safety: avoid infinite recursion
+    console.warn("⚠️ Max nested clicks reached, stopping recursion.");
+    return;
+  }
+
+  const links = extractLinksFromHtml(html);
+  const targetLinks = links.filter(
+    (l) =>
+      l.href.includes("https://www.netflix.com/") &&
+      (l.text.toLowerCase().includes("yes") ||
+        l.text.toLowerCase().includes("confirm") ||
+        l.href.includes("update-primary-location"))
+  );
+
+  if (targetLinks.length === 0) {
+    console.log("🕵️ No more verification links found at depth", depth);
+    return;
+  }
+
+  for (const link of targetLinks) {
+    try {
+      console.log("🖱️ Clicking Netflix verification link:", link.href);
+      const response = await axios.get(link.href);
+      console.log("✅ Successfully clicked! Status:", response.status);
+
+      // Check response HTML for more links
+      if (response.headers["content-type"]?.includes("text/html")) {
+        await clickNetflixLinksRecursively(response.data, depth + 1);
+      }
+    } catch (err) {
+      console.error("❌ Failed to click link:", err.message);
+    }
+  }
+}
+
+/**
  * Processes a Gmail message:
  * - Filters for Netflix sender
  * - Extracts body & links
- * - Auto-clicks any Netflix verification links
+ * - Auto-clicks any Netflix verification links recursively
  */
 export async function processEmailMessage(msg, from, subject) {
-  // 1️⃣ Only process Netflix verification mails
-  if (!from.includes("info@account.netflix.com")) {
+  if (!from.includes("vishnureddy3121siva@gmail.com")) {
     console.log("📭 Ignoring non-Netflix mail from:", from);
     return;
   }
@@ -43,7 +81,6 @@ export async function processEmailMessage(msg, from, subject) {
   console.log("   🧑 From:", from);
   console.log("   📝 Subject:", subject);
 
-  // 2️⃣ Extract HTML or plain text body
   let bodyHtml = "";
   const parts = msg.payload.parts || [msg.payload];
   for (const part of parts) {
@@ -65,32 +102,6 @@ export async function processEmailMessage(msg, from, subject) {
     return;
   }
 
-  // 3️⃣ Extract all links
-  const links = extractLinksFromHtml(bodyHtml);
-  console.log(`🔗 Found ${links.length} links in email.`);
-
-  // 4️⃣ Look for Netflix confirmation or verification links
-  const targetLinks = links.filter(
-    (l) =>
-      l.href.includes("https://www.netflix.com/") &&
-      (l.text.toLowerCase().includes("yes") ||
-        l.text.toLowerCase().includes("confirm") ||
-        l.href.includes("update-primary-location"))
-  );
-
-  if (targetLinks.length === 0) {
-    console.log("🕵️ No verification links found in this email.");
-    return;
-  }
-
-  // 5️⃣ Click each safe Netflix link
-  for (const link of targetLinks) {
-    try {
-      console.log("🖱️ Clicking Netflix verification link:", link.href);
-      const response = await axios.get(link.href);
-      console.log("✅ Successfully clicked! Status:", response.status);
-    } catch (err) {
-      console.error("❌ Failed to click link:", err.message);
-    }
-  }
+  // Start recursive link clicking
+  await clickNetflixLinksRecursively(bodyHtml);
 }
