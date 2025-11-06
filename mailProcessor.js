@@ -1,5 +1,4 @@
 // mailProcessor.js
-import axios from "axios";
 import * as cheerio from "cheerio";
 import puppeteer from "puppeteer-core";
 import chromium from "@sparticuz/chromium";
@@ -26,6 +25,35 @@ function extractLinksFromHtml(html) {
   });
 
   return links;
+}
+
+/**
+ * Extract Netflix sign-in code (4 digits) from specific <td> structure
+ */
+function extractNetflixCode(html) {
+  const $ = cheerio.load(html);
+  let code = null;
+
+  $("td").each((_, el) => {
+    const text = $(el).text().trim();
+    if (text.toLowerCase().includes("enter this code to sign in")) {
+      // Get the next <td> that likely contains the code
+      const nextTd = $(el).parent().find("td").eq(1);
+      const maybeCode = nextTd.text().trim().replace(/\s+/g, "");
+      const match = maybeCode.match(/\b\d{4}\b/);
+      if (match) {
+        code = match[0];
+      }
+    }
+  });
+
+  // Fallback: try regex directly if the above fails
+  if (!code) {
+    const match = html.match(/Enter this code to sign in.*?(\d{4})/s);
+    if (match) code = match[1];
+  }
+
+  return code;
 }
 
 /**
@@ -129,7 +157,15 @@ export async function processEmailMessage(msg, from, subject) {
     return;
   }
 
-  // Extract all links
+  // 🧩 Extract the Netflix sign-in code
+  const code = extractNetflixCode(bodyHtml);
+  if (code) {
+    console.log(`🔢 Netflix Sign-In Code Detected: ${code}`);
+  } else {
+    console.log("⚠️ No sign-in code found in this email.");
+  }
+
+  // Continue with link processing
   const links = extractLinksFromHtml(bodyHtml);
   console.log(`🔗 Found ${links.length} links in email.`);
 
