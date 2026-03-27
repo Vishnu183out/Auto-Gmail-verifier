@@ -24,6 +24,7 @@ const RECIPIENTS = [
   "vishnu183out@gmail.com",
   "hrushikeshpenubarthi@gmail.com",
   "amirudhshanmukha2399@gmail.com",
+  "tallurisreshta@gmail.com",
 ];
 
 function decodeBase64(encoded) {
