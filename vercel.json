@@ -1,9 +1,28 @@
 {
   "version": 2,
+
   "builds": [
-    { "src": "api/gmail-webhook.js", "use": "@vercel/node" }
+    {
+      "src": "api/*.js",
+      "use": "@vercel/node"
+    }
   ],
+
   "routes": [
-    { "src": "/(.*)", "dest": "api/gmail-webhook.js" }
+    {
+      "src": "/api/gmailWatcher",
+      "dest": "api/gmailWatcher.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "api/gmail-webhook.js"
+    }
+  ],
+
+  "crons": [
+    {
+      "path": "/api/gmailWatcher",
+      "schedule": "0 0 * * *"
+    }
   ]
 }
