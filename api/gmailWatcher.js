@@ -1,34 +1,40 @@
 import { google } from "googleapis";
-import dotenv from "dotenv";
-dotenv.config();
 
-const {
-  CLIENT_ID,
-  CLIENT_SECRET,
-  REDIRECT_URI,
-  REFRESH_TOKEN,
-  GMAIL_TOPIC_NAME,
-} = process.env;
+const oauth2Client = new google.auth.OAuth2(
+  process.env.CLIENT_ID,
+  process.env.CLIENT_SECRET,
+  process.env.REDIRECT_URI
+);
 
-const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
-oauth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
+oauth2Client.setCredentials({
+  refresh_token: process.env.REFRESH_TOKEN,
+});
 
-const gmail = google.gmail({ version: "v1", auth: oauth2Client });
+const gmail = google.gmail({
+  version: "v1",
+  auth: oauth2Client,
+});
 
-async function startWatch() {
+export default async function handler(req, res) {
   try {
-    const res = await gmail.users.watch({
+    const response = await gmail.users.watch({
       userId: "me",
       requestBody: {
-        topicName: `projects/${process.env.GCP_PROJECT_ID}/topics/${GMAIL_TOPIC_NAME}`,
+        topicName: `projects/${process.env.GCP_PROJECT_ID}/topics/${process.env.GMAIL_TOPIC_NAME}`,
         labelIds: ["INBOX"],
       },
     });
-    console.log("✅ Gmail watch started successfully!");
-    console.log("Response:", res.data);
+
+    res.status(200).json({
+      success: true,
+      expiration: response.data.expiration,
+    });
   } catch (err) {
-    console.error("❌ Failed to start Gmail watch:", err);
+    console.error(err);
+
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
   }
 }
-
-startWatch();
